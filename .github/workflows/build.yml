@@ -1,0 +1,74 @@
+# Builds the tvOS app on GitHub's macOS 26 runner and publishes it unsigned.
+# The .ipa is signed later, on the way to the Apple TV (Sideloadly with any
+# Apple ID, or TestFlight with a paid team), so the runner needs no certificate.
+name: Build tvOS app
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode 26.6
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcodebuild -version
+          cmake --version | head -1
+
+      - name: Apply the vendored patches
+        run: bash RoonVis/patches/apply.sh
+
+      - name: Generate the Xcode project
+        run: cmake -S RoonVis -B RoonVis -G Xcode -DCMAKE_SYSTEM_NAME=tvOS -DROONVIS_DEVELOPMENT_TEAM=
+
+      - name: Build RoonVis (Release, unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project RoonVis/RoonVis.xcodeproj -target RoonVis -configuration Release \
+            -sdk appletvos ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            build | tee build.log | grep -E 'error:|warning: .*RoonVis/Sources|\*\*|Build succeeded|BUILD' || true
+          grep -q '\*\* BUILD SUCCEEDED \*\*' build.log
+
+      - name: Package the .ipa
+        id: ipa
+        run: |
+          app=$(find RoonVis -type d -name RoonVis.app -path '*Release-appletvos*' | head -1)
+          test -n "$app" || { echo "no RoonVis.app in the build output"; find RoonVis -maxdepth 2 -type d -name '*appletvos*'; exit 1; }
+          rm -rf Payload && mkdir Payload && cp -R "$app" Payload/
+          name="RoonVis-${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}-unsigned.ipa"
+          zip -qr "$name" Payload
+          ls -l "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ipa.outputs.name }}
+          path: ${{ steps.ipa.outputs.name }}
+          retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "${{ steps.ipa.outputs.name }}" --title "$GITHUB_REF_NAME" --generate-notes || gh release upload "$GITHUB_REF_NAME" "${{ steps.ipa.outputs.name }}" --clobber
