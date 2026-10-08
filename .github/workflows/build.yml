@@ -20,7 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: true
+
+      # projectM needs its own submodules (projectm-eval, hlslparser); ANGLE's nested
+      # third_party ones are not used by this build, and one of them lives on a private
+      # Google host that a recursive fetch cannot reach.
+      - name: Fetch projectM's submodules
+        run: git -C vendor/projectm submodule update --init --recursive
 
       - name: Select Xcode 26.6
         run: |
